@@ -453,32 +453,649 @@ DELETE https://mail.canhnhat.tech/api/email/test@canhnhat.tech
 
 ---
 
-## PHẦN 13: TROUBLESHOOTING
+## PHẦN 13: TROUBLESHOOTING - FIX LỖI CHI TIẾT
 
-### Email không được nhận
+### ❌ LỖI 1: EMAIL KHÔNG ĐƯỢC NHẬN
+
+**Triệu chứng:** Email gửi đến test@canhnhat.tech nhưng không xuất hiện trong database
+
+#### 🔍 Bước 1: Kiểm tra DNS
 ```bash
 nslookup -type=MX canhnhat.tech
-tail -100 /var/log/syslog | grep postfix
-postqueue -p
 ```
 
-### API không hoạt động
+**Kết quả mong đợi:**
+```
+Server:  8.8.8.8
+Address: 8.8.8.8#53
+
+canhnhat.tech   mail exchanger = 10 mail.canhnhat.tech.
+```
+
+**Nếu không có MX record:**
+1. Đăng nhập inet.vn
+2. Quản lý DNS domain canhnhat.tech
+3. Thêm bản ghi MX: `@ → mail.canhnhat.tech (priority 10)`
+4. Đợi 5-10 phút để DNS cập nhật
+
+#### 🔍 Bước 2: Kiểm tra DNS A record
 ```bash
-journalctl -u mail-api -n 50
+nslookup mail.canhnhat.tech
+```
+
+**Kết quả mong đợi:**
+```
+Server:  8.8.8.8
+Address: 8.8.8.8#53
+
+mail.canhnhat.tech      canonical name = mail.canhnhat.tech.
+Address: 172.104.62.246
+```
+
+**Nếu không resolve:**
+1. Kiểm tra inet.vn - bản ghi A `mail → [IP_VPS]`
+2. Xác nhận IP VPS chính xác
+3. Đợi DNS propagation 5-10 phút
+
+#### 🔍 Bước 3: Kiểm tra Postfix status
+```bash
+systemctl status postfix
+```
+
+**Nếu status "exited (not running)":**
+```bash
+postfix start
+systemctl enable postfix
+systemctl restart postfix
+```
+
+#### 🔍 Bước 4: Kiểm tra Postfix configuration
+```bash
+postfix check
+```
+
+**Nếu có lỗi cú pháp:**
+```bash
+# Xem chi tiết lỗi
+postfix check
+# Sửa file main.cf tương ứng
+nano /etc/postfix/main.cf
+# Sau sửa, reload
+postfix reload
+```
+
+#### 🔍 Bước 5: Kiểm tra virtual aliases
+```bash
+postmap -q @canhnhat.tech /etc/postfix/virtual
+```
+
+**Kết quả mong đợi:** `webhook`
+
+**Nếu không có kết quả:**
+```bash
+# Kiểm tra file virtual
+cat /etc/postfix/virtual
+
+# Nếu thiếu, thêm:
+cat > /etc/postfix/virtual << 'EOF'
+@canhnhat.tech webhook
+EOF
+
+# Postmap lại
+postmap /etc/postfix/virtual
+postfix reload
+```
+
+#### 🔍 Bước 6: Kiểm tra transport mapping
+```bash
+postmap -q canhnhat.tech /etc/postfix/transport
+```
+
+**Kết quả mong đợi:** `webhook:`
+
+**Nếu không có kết quả:**
+```bash
+# Kiểm tra file transport
+cat /etc/postfix/transport
+
+# Nếu thiếu, thêm:
+cat > /etc/postfix/transport << 'EOF'
+canhnhat.tech webhook:
+EOF
+
+# Postmap lại
+postmap /etc/postfix/transport
+postfix reload
+```
+
+#### 🔍 Bước 7: Kiểm tra webhook script
+```bash
+ls -la /usr/local/bin/postfix-webhook.sh
+cat /usr/local/bin/postfix-webhook.sh
+```
+
+**Nếu không tồn tại hoặc thiếu quyền:**
+```bash
+cat > /usr/local/bin/postfix-webhook.sh << 'EOF'
+#!/bin/bash
+/usr/bin/curl -X POST "http://127.0.0.1:5000/webhook" \
+  -H "X-Secret: LETTAI_SECRET6" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @- 2>/dev/null
+exit 0
+EOF
+
+chmod +x /usr/local/bin/postfix-webhook.sh
+```
+
+#### 🔍 Bước 8: Xem Postfix logs
+```bash
+tail -100 /var/log/syslog | grep postfix
+```
+
+**Các lỗi thường gặp:**
+
+**Lỗi:** `unknown virtual alias table type: hash:/etc/postfix/virtual`
+- **Fix:** Kiểm tra `/etc/postfix/main.cf` có dòng `virtual_alias_maps = hash:/etc/postfix/virtual`
+- Nếu thiếu, thêm vào main.cf rồi `postfix reload`
+
+**Lỗi:** `connect to 127.0.0.1:5000: Connection refused`
+- **Fix:** Flask API không chạy, xem lỗi API (phần dưới)
+
+**Lỗi:** `permission denied: /usr/local/bin/postfix-webhook.sh`
+- **Fix:** `chmod +x /usr/local/bin/postfix-webhook.sh`
+
+#### 🔍 Bước 9: Test webhook manual
+```bash
+# Tạo test email
+cat > /tmp/test.eml << 'EOF'
+From: test@gmail.com
+To: test@canhnhat.tech
+Subject: Test Email
+Date: Mon, 15 Nov 2025 10:00:00 +0700
+
+Test content
+EOF
+
+# Gửi đến API
+curl -X POST "http://127.0.0.1:5000/webhook" \
+  -H "X-Secret: LETTAI_SECRET6" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @/tmp/test.eml
+```
+
+**Nếu có lỗi:** Kiểm tra Flask API (phần dưới)
+
+---
+
+### ❌ LỖI 2: API KHÔNG HOẠT ĐỘNG
+
+**Triệu chứng:** Không thể kết nối tới API hoặc API trả về lỗi
+
+#### 🔍 Bước 1: Kiểm tra service status
+```bash
+systemctl status mail-api
+```
+
+**Nếu "inactive (dead)":**
+```bash
+systemctl start mail-api
+systemctl enable mail-api
+systemctl status mail-api
+```
+
+#### 🔍 Bước 2: Kiểm tra logs
+```bash
+journalctl -u mail-api -n 100
+```
+
+**Lỗi:** `ModuleNotFoundError: No module named 'flask'`
+- **Fix:** Cài đặt dependencies
+```bash
+pip3 install flask mail-parser gunicorn
+```
+
+**Lỗi:** `Address already in use`
+- **Fix:** Port 5000 bị sử dụng
+```bash
+lsof -i :5000
+kill -9 <PID>
+systemctl restart mail-api
+```
+
+**Lỗi:** `FileNotFoundError: /home/server_mail/emails.db`
+- **Fix:** Database chưa tạo
+```bash
+cd /home/server_mail
+python3 -c "from only_api import create_app; app = create_app(); print('DB created')"
+```
+
+#### 🔍 Bước 3: Test API trực tiếp
+```bash
 curl -v http://127.0.0.1:5000/api/health
+```
+
+**Kết quả mong đợi:** HTTP 200 với JSON `{"status":"healthy",...}`
+
+**Nếu Connection refused:**
+```bash
 netstat -tlnp | grep 5000
 ```
 
-### Nginx error
+**Nếu không thấy 5000:**
+- Khởi động lại service
 ```bash
-nginx -t
-tail -50 /var/log/nginx/error.log
+systemctl restart mail-api
 ```
 
-### SPF/DKIM không hoạt động
+#### 🔍 Bước 4: Kiểm tra file only_api.py
+```bash
+cd /home/server_mail
+python3 -m py_compile only_api.py
+```
+
+**Nếu có lỗi syntax:**
+```bash
+python3 only_api.py
+```
+- Xem lỗi và sửa file
+
+#### 🔍 Bước 5: Kiểm tra quyền file
+```bash
+ls -la /home/server_mail/only_api.py
+ls -la /home/server_mail/emails.db
+```
+
+**Nếu không có read permission:**
+```bash
+chmod 644 /home/server_mail/only_api.py
+chmod 666 /home/server_mail/emails.db
+```
+
+#### 🔍 Bước 6: Kiểm tra service file
+```bash
+cat /etc/systemd/system/mail-api.service
+```
+
+**Kiểm tra các dòng quan trọng:**
+```
+WorkingDirectory=/home/server_mail     # Đúng
+ExecStart=/usr/bin/python3 -m gunicorn -w 4 -b 127.0.0.1:5000 only_api:create_app()
+```
+
+**Nếu sai, sửa:**
+```bash
+nano /etc/systemd/system/mail-api.service
+systemctl daemon-reload
+systemctl restart mail-api
+```
+
+#### 🔍 Bước 7: Test database
+```bash
+sqlite3 /home/server_mail/emails.db "SELECT COUNT(*) FROM emails;"
+```
+
+**Nếu lỗi "no such table":**
+```bash
+# Xóa DB cũ
+rm /home/server_mail/emails.db
+# Khởi động lại API để tạo DB mới
+systemctl restart mail-api
+```
+
+---
+
+### ❌ LỖI 3: NGINX KHÔNG HOẠT ĐỘNG / HTTPS LỖI
+
+**Triệu chứng:** 502 Bad Gateway, SSL error, hoặc không thể truy cập https
+
+#### 🔍 Bước 1: Kiểm tra Nginx syntax
+```bash
+nginx -t
+```
+
+**Nếu có lỗi:**
+```bash
+# Xem chi tiết
+nginx -T
+
+# Sửa file cấu hình
+nano /etc/nginx/sites-available/mail.canhnhat.tech
+
+# Reload
+systemctl reload nginx
+```
+
+#### 🔍 Bước 2: Kiểm tra Nginx status
+```bash
+systemctl status nginx
+```
+
+**Nếu "inactive":**
+```bash
+systemctl start nginx
+systemctl enable nginx
+```
+
+#### 🔍 Bước 3: Kiểm tra SSL certificate
+```bash
+ls -la /etc/letsencrypt/live/mail.canhnhat.tech/
+```
+
+**Nếu không tồn tại:**
+```bash
+certbot certonly --standalone -d mail.canhnhat.tech -d canhnhat.tech
+```
+
+#### 🔍 Bước 4: Kiểm tra certificate hợp lệ
+```bash
+openssl x509 -in /etc/letsencrypt/live/mail.canhnhat.tech/fullchain.pem -text -noout
+```
+
+**Kiểm tra dòng:**
+- `Issuer: C = US, O = Let's Encrypt` - OK
+- `Not Before` và `Not After` - Xác nhận còn hạn
+
+**Nếu hết hạn:**
+```bash
+certbot renew --force-renewal
+systemctl reload nginx
+```
+
+#### 🔍 Bước 5: Kiểm tra Nginx logs
+```bash
+tail -50 /var/log/nginx/error.log
+tail -50 /var/log/nginx/access.log
+```
+
+**Lỗi:** `502 Bad Gateway`
+- **Fix:** Flask API không chạy, kiểm tra phần "API không hoạt động"
+
+**Lỗi:** `upstream timed out`
+- **Fix:** Tăng timeout trong Nginx config
+```bash
+nano /etc/nginx/sites-available/mail.canhnhat.tech
+# Tăng các dòng proxy_*_timeout
+systemctl reload nginx
+```
+
+#### 🔍 Bước 6: Test HTTPS từ client
+```bash
+curl -v https://mail.canhnhat.tech/api/health
+```
+
+**Nếu SSL certificate error:**
+```bash
+# Kiểm tra certificate chain
+openssl s_client -connect mail.canhnhat.tech:443 -showcerts
+```
+
+#### 🔍 Bước 7: Kiểm tra firewall
+```bash
+ufw status
+```
+
+**Nếu 443 chưa mở:**
+```bash
+ufw allow 443/tcp
+ufw reload
+```
+
+---
+
+### ❌ LỖI 4: SPF / DKIM KHÔNG HOẠT ĐỘNG
+
+**Triệu chứng:** Email bị spam, DKIM/SPF validation fails
+
+#### 🔍 Bước 1: Kiểm tra SPF record
 ```bash
 dig canhnhat.tech TXT +short | grep spf
+```
+
+**Kết quả mong đợi:** `v=spf1 mx a ~all`
+
+**Nếu không có:**
+1. inet.vn → Quản lý DNS
+2. Thêm TXT record: `@ → v=spf1 mx a ~all`
+3. Đợi DNS propagate
+
+#### 🔍 Bước 2: Kiểm tra DKIM record
+```bash
 dig default._domainkey.canhnhat.tech TXT +short
+```
+
+**Kết quả mong đợi:** `v=DKIM1; h=sha256; k=rsa; p=...`
+
+**Nếu không có:**
+```bash
+# Xem public key
+cat /etc/opendkim/keys/canhnhat.tech/default.txt
+
+# Copy toàn bộ từ v=DKIM1... đến hết
+# Thêm vào inet.vn: TXT record `default._domainkey → [copied value]`
+```
+
+#### 🔍 Bước 3: Kiểm tra OpenDKIM service
+```bash
+systemctl status opendkim
+```
+
+**Nếu "inactive":**
+```bash
+systemctl start opendkim
+systemctl enable opendkim
+systemctl restart postfix
+```
+
+#### 🔍 Bước 4: Kiểm tra OpenDKIM logs
+```bash
+tail -50 /var/log/syslog | grep opendkim
+```
+
+**Lỗi:** `bind(): Address already in use`
+- **Fix:** Port 8891 bị sử dụng
+```bash
+lsof -i :8891
+kill -9 <PID>
+systemctl restart opendkim
+```
+
+**Lỗi:** `Unable to open key file`
+- **Fix:** Quyền file sai
+```bash
+chown opendkim:opendkim /etc/opendkim/keys/canhnhat.tech/*
+chmod 400 /etc/opendkim/keys/canhnhat.tech/default.private
+chmod 444 /etc/opendkim/keys/canhnhat.tech/default.txt
+```
+
+#### 🔍 Bước 5: Test DKIM
+Gửi email từ Gmail tới test@canhnhat.tech:
+1. Mở email nhận được
+2. Click "..." → "Show original"
+3. Tìm dòng: `dkim=pass` hoặc `dkim=fail`
+
+**Nếu dkim=fail:**
+- Kiểm tra lại DNS DKIM record
+- Xác nhận key value đúng
+
+#### 🔍 Bước 6: Kiểm tra Postfix milter config
+```bash
+grep milter /etc/postfix/main.cf
+```
+
+**Kết quả mong đợi:**
+```
+milter_default_action = accept
+milter_protocol = 6
+smtpd_milters = inet:localhost:8891
+non_smtpd_milters = inet:localhost:8891
+```
+
+**Nếu thiếu:**
+```bash
+cat >> /etc/postfix/main.cf << 'EOF'
+milter_default_action = accept
+milter_protocol = 6
+smtpd_milters = inet:localhost:8891
+non_smtpd_milters = inet:localhost:8891
+EOF
+
+postfix reload
+```
+
+---
+
+### ❌ LỖI 5: FIREWALL CHẶN EMAIL/API
+
+**Triệu chứng:** Không thể gửi email, API không thể truy cập từ ngoài
+
+#### 🔍 Bước 1: Kiểm tra firewall status
+```bash
+ufw status
+```
+
+#### 🔍 Bước 2: Mở ports cần thiết
+```bash
+# SMTP
+ufw allow 25/tcp
+
+# HTTP/HTTPS
+ufw allow 80/tcp
+ufw allow 443/tcp
+
+# Optional (POP3, IMAP)
+ufw allow 110/tcp
+ufw allow 143/tcp
+ufw allow 993/tcp
+ufw allow 995/tcp
+
+# Reload
+ufw reload
+```
+
+#### 🔍 Bước 3: Kiểm tra port mở
+```bash
+netstat -tlnp
+```
+
+**Các port cần thấy:**
+- `:25` → postfix
+- `:5000` → flask (127.0.0.1)
+- `:80` → nginx
+- `:443` → nginx
+- `:8891` → opendkim (127.0.0.1)
+
+**Nếu thiếu, restart service tương ứng**
+
+---
+
+### ❌ LỖI 6: DATABASE LỖI / EMAIL KHÔNG LƯU
+
+**Triệu chứng:** Email nhận được nhưng không xuất hiện trong database
+
+#### 🔍 Bước 1: Kiểm tra database tồn tại
+```bash
+ls -la /home/server_mail/emails.db
+```
+
+**Nếu không tồn tại:**
+```bash
+# Khởi động Flask để tạo DB
+systemctl restart mail-api
+sleep 2
+# Hoặc tạo manual:
+cd /home/server_mail
+python3 << 'EOF'
+from only_api import create_app
+app = create_app()
+print("Database created at /home/server_mail/emails.db")
+EOF
+```
+
+#### 🔍 Bước 2: Kiểm tra database integrity
+```bash
+sqlite3 /home/server_mail/emails.db ".tables"
+sqlite3 /home/server_mail/emails.db ".schema emails"
+```
+
+**Nếu lỗi:**
+```bash
+# Backup cũ
+cp /home/server_mail/emails.db /home/server_mail/emails.db.bak
+
+# Xóa và tạo mới
+rm /home/server_mail/emails.db
+systemctl restart mail-api
+```
+
+#### 🔍 Bước 3: Kiểm tra dữ liệu
+```bash
+sqlite3 /home/server_mail/emails.db "SELECT COUNT(*) FROM emails;"
+sqlite3 /home/server_mail/emails.db "SELECT * FROM emails LIMIT 5;"
+```
+
+#### 🔍 Bước 4: Kiểm tra quyền file
+```bash
+ls -la /home/server_mail/emails.db
+```
+
+**Nếu quyền sai:**
+```bash
+chmod 666 /home/server_mail/emails.db
+```
+
+#### 🔍 Bước 5: Test webhook với curl
+```bash
+curl -X POST "http://127.0.0.1:5000/webhook" \
+  -H "X-Secret: LETTAI_SECRET6" \
+  -H "Content-Type: application/octet-stream" \
+  -d "From: test@gmail.com\nTo: test@canhnhat.tech\nSubject: Test\n\nTest body"
+```
+
+**Nếu có lỗi:**
+```bash
+journalctl -u mail-api -n 20
+```
+
+---
+
+### ⚡ QUICK FIX CHECKLIST
+
+```bash
+# Tất cả services chạy?
+systemctl status postfix opendkim mail-api nginx
+
+# Tất cả ports mở?
+ufw status | grep ALLOW
+
+# DNS ok?
+nslookup -type=MX canhnhat.tech
+nslookup mail.canhnhat.tech
+
+# API respond?
+curl -s http://127.0.0.1:5000/api/health
+
+# Database ok?
+sqlite3 /home/server_mail/emails.db "SELECT COUNT(*) FROM emails;"
+
+# Logs?
+tail -20 /var/log/syslog | grep -i "postfix\|opendkim\|nginx"
+journalctl -u mail-api -n 20
+```
+
+**Nếu vẫn lỗi:**
+```bash
+# Restart tất cả
+systemctl restart postfix opendkim mail-api nginx
+
+# Reload configs
+postfix reload
+nginx -s reload
+systemctl reload opendkim
+
+# Xem logs chi tiết
+journalctl -xeu mail-api
+tail -100 /var/log/syslog
 ```
 
 ---
