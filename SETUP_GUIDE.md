@@ -85,8 +85,8 @@ apt install python3 python3-pip git curl wget nano sqlite3 -y
 ### 3.4 Clone project
 ```bash
 cd /home
-git clone https://github.com/lettaidev/server_mail.git
-cd server_mail
+git clone https://github.com/nhatthichcodee/Mail_Server.git
+cd Mail_Server
 ```
 
 ### 3.5 Cài đặt Python dependencies
